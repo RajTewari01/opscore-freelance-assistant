@@ -1,8 +1,9 @@
-"""Gemini API integration — builds the structured prompt and parses the JSON response."""
+"""AI Service API integration — google.genai for Gemini, litellm for other providers."""
 
 import json
-
-import google.generativeai as genai
+import re
+import litellm
+from google import genai
 
 from opscore.config import settings
 from opscore.models.schemas import (
@@ -47,13 +48,31 @@ Respond ONLY in the following JSON format. No markdown, no explanation outside t
 }}"""
 
 
-def configure_gemini():
-    """Configure the Gemini API client with the API key from settings."""
-    genai.configure(api_key=settings.GEMINI_API_KEY)
+def get_model_string(provider: str) -> str:
+    """Map the frontend provider ID to the exact routing string."""
+    if not provider or provider == "gemini":
+        return "gemini/gemini-2.0-flash"
+        
+    if "/" in provider:
+        # Strip any stale -latest suffix from cached selections
+        sanitized = provider.replace("-latest", "")
+        # Redirect any retired 1.5/1.0 models to 2.0-flash
+        if "gemini-1.5" in sanitized or "gemini-1.0" in sanitized or sanitized == "gemini/gemini-pro":
+            return "gemini/gemini-2.0-flash"
+        return sanitized
+        
+    if provider == "openai":
+        return "gpt-4o-mini"
+    elif provider == "anthropic":
+        return "claude-3-haiku-20240320"
+    elif provider == "grok":
+        return "xai/grok-beta"
+    else:
+        return "gemini/gemini-2.0-flash"
 
 
 def build_prompt(email_summaries: str, calendar_events: str, drive_files: str) -> str:
-    """Build the structured Gemini prompt from all three data sources."""
+    """Build the structured prompt from all three data sources."""
     return PROMPT_TEMPLATE.format(
         email_summaries=email_summaries,
         calendar_events=calendar_events,
@@ -61,20 +80,50 @@ def build_prompt(email_summaries: str, calendar_events: str, drive_files: str) -
     )
 
 
-def analyze_context(context_prompt: str) -> AnalysisResponse:
-    """Send the assembled prompt to Gemini and parse the JSON response."""
-    configure_gemini()
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
-    response = model.generate_content(context_prompt)
-    raw_text = response.text.strip()
-
-    # Strip markdown code fences if Gemini wraps the JSON
+def parse_json_fallback(raw_text: str) -> dict:
+    """Safely extract JSON payload even if the LLM hallucinates markdown wrappers."""
+    raw_text = raw_text.strip()
     if raw_text.startswith("```"):
         lines = raw_text.split("\n")
         raw_text = "\n".join(lines[1:-1])
+    if raw_text.lower().startswith("json"):
+        raw_text = raw_text[4:].strip()
 
-    parsed = json.loads(raw_text)
+    try:
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        match = re.search(r'\{[\s\S]*\}', raw_text)
+        if match:
+            return json.loads(match.group(0))
+        raise
+
+
+def analyze_context(context_prompt: str, provider: str = None, api_key: str = None) -> AnalysisResponse:
+    """Send the assembled prompt to the selected Provider and parse the JSON response."""
+    model_str = get_model_string(provider)
+    api_key_val = api_key if api_key else settings.GEMINI_API_KEY
+
+    if not api_key_val:
+        raise ValueError("Missing API Key: Please enter your provider API Key in the Settings menu.")
+
+    # Native google.genai for Gemini models (uses v1 API, not deprecated v1beta)
+    if model_str.startswith("gemini/"):
+        client = genai.Client(api_key=api_key_val)
+        bare_model = model_str.replace("gemini/", "")
+        response = client.models.generate_content(
+            model=bare_model,
+            contents=context_prompt,
+        )
+        raw_text = response.text
+    else:
+        # LiteLLM for OpenAI / Anthropic / xAI
+        response = litellm.completion(
+            model=model_str,
+            messages=[{"role": "user", "content": context_prompt}],
+            api_key=api_key_val
+        )
+        raw_text = response.choices[0].message.content
+    parsed = parse_json_fallback(raw_text)
 
     priority_queue = [
         PriorityItem(**item) for item in parsed.get("priority_queue", [])
@@ -98,3 +147,25 @@ def analyze_context(context_prompt: str) -> AnalysisResponse:
         drafted_reply=drafted_reply,
         deadline_alert=deadline_alert,
     )
+
+
+def execute_action_prompt(prompt: str, expect_json: bool = False, provider: str = None, api_key: str = None) -> str:
+    """Executes a generic Multi-Model prompt for specific micro-actions (summarize, draft, graphify)."""
+    model_str = get_model_string(provider)
+    api_key_val = api_key if api_key else settings.GEMINI_API_KEY
+    
+    if model_str.startswith("gemini/"):
+        client = genai.Client(api_key=api_key_val)
+        bare_model = model_str.replace("gemini/", "")
+        response = client.models.generate_content(
+            model=bare_model,
+            contents=prompt,
+        )
+        return response.text
+    else:
+        response = litellm.completion(
+            model=model_str,
+            messages=[{"role": "user", "content": prompt}],
+            api_key=api_key_val
+        )
+        return response.choices[0].message.content

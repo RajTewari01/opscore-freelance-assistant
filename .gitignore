@@ -1,10 +1,47 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
 build/
 dist/
 wheels/
 *.egg-info
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
 
-# Virtual environments
-.venv
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/*.log
+frontend/.vercel
+
+# Environment & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Scratch / Temporary
+test_models.py
+scratch/
+prompt.md
+package-lock.json
+frontend/package-lock.json
+
+# python_modules/
+/venv
+test_models.py
+
+# md
+prompt.md

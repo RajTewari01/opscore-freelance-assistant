@@ -15,13 +15,11 @@ def fetch_todays_events(credentials) -> list[dict]:
     service = get_calendar_service(credentials)
 
     now = datetime.now(timezone.utc)
-    start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = start_of_day + timedelta(days=1)
 
     events_result = service.events().list(
         calendarId="primary",
-        timeMin=start_of_day.isoformat(),
-        timeMax=end_of_day.isoformat(),
+        timeMin=now.isoformat(),
+        maxResults=10,
         singleEvents=True,
         orderBy="startTime",
     ).execute()
@@ -41,6 +39,15 @@ def fetch_todays_events(credentials) -> list[dict]:
         })
 
     return calendar_events
+
+
+def insert_event(credentials, event_data: dict):
+    """Inserts an event into the primary calendar.
+    event_data should format {'summary': '...', 'start': {'dateTime': '...'}, 'end': {'dateTime': '...'}}
+    """
+    service = get_calendar_service(credentials)
+    result = service.events().insert(calendarId='primary', body=event_data).execute()
+    return result
 
 
 def format_events_for_prompt(calendar_events: list[dict]) -> str:

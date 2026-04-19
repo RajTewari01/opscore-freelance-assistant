@@ -29,6 +29,13 @@ class DeadlineAlert(BaseModel):
     action_needed: str = Field(default="", description="What the user should do")
 
 
+class RawDataPayload(BaseModel):
+    """Raw context data arrays bridged to the frontend."""
+    emails: list[dict] = Field(default_factory=list)
+    calendar: list[dict] = Field(default_factory=list)
+    drive: list[dict] = Field(default_factory=list)
+    sheets: dict | None = Field(default=None)
+
 class AnalysisResponse(BaseModel):
     """Complete response from the /analyze endpoint."""
 
@@ -41,14 +48,27 @@ class AnalysisResponse(BaseModel):
     deadline_alert: DeadlineAlert = Field(
         ..., description="Nearest deadline alert"
     )
+    raw_data: RawDataPayload = Field(
+        default_factory=RawDataPayload, description="Unfiltered original context data pipeline"
+    )
 
 
 class RegenerateRequest(BaseModel):
     """Request body for the /regenerate endpoint."""
-
     additional_context: str = Field(
         default="", description="Optional extra instructions for regeneration"
     )
+
+class ActionRequest(BaseModel):
+    """Request body for granular micro-actions on specific clicked items."""
+    action_type: str = Field(..., description="E.g., 'summarize', 'draft', 'schedule', 'graphify'")
+    context_item: dict = Field(..., description="The raw data object (email, event, sheet) to act upon")
+    additional_context: str = Field(default="", description="Optional prompt details")
+
+class ActionResponse(BaseModel):
+    """Response returned from micro-actions."""
+    status: str = Field(default="success")
+    result: str | dict = Field(..., description="The AI response or execution result")
 
 
 class AuthStatus(BaseModel):

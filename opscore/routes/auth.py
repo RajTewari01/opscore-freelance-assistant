@@ -71,7 +71,8 @@ async def callback(request: Request):
     request.session["user_email"] = user_info.get("email", "")
     request.session["user_picture"] = user_info.get("picture", "")
 
-    return RedirectResponse(url="/")
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(url=frontend_url)
 
 
 @router.get("/status", response_model=AuthStatus)
@@ -97,4 +98,6 @@ async def auth_status(request: Request) -> AuthStatus:
 async def logout(request: Request):
     """Clear the session and redirect to home."""
     request.session.clear()
-    return RedirectResponse(url="/")
+    # Redirect back to the Next.js frontend (or fallback to /)
+    frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    return RedirectResponse(url=frontend_url)

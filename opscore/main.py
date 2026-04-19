@@ -37,13 +37,12 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(assistant.router)
 
-# Mount static files directory (A4)
-static_directory = os.path.join(os.path.dirname(__file__), "static")
-app.mount("/static", StaticFiles(directory=static_directory), name="static")
-
-
 @app.get("/")
 async def serve_frontend():
-    """Serve the React frontend from static/index.html."""
-    index_path = os.path.join(static_directory, "index.html")
-    return FileResponse(index_path)
+    """Return an API healthcheck; the Next.js frontend is served separately."""
+    return {"message": "OpsCore AI API is actively serving."}
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("opscore.main:app", host="0.0.0.0", port=port, reload=False)
