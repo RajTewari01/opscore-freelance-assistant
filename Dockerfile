@@ -1,18 +1,43 @@
+# ============= Stage 1: Build Next.js Frontend =============
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+
+# Production build — outputs standalone server
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# ============= Stage 2: Production Runtime =============
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# Copy requirement files first for docker caching
-COPY opscore/requirements.txt requirements.txt
+# Install Node.js for Next.js standalone server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl supervisor && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
+# Python dependencies
+COPY opscore/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the entire project
-COPY . .
+# Copy backend
+COPY opscore/ opscore/
+COPY main.py .
 
-# Expose port (Cloud Run sets $PORT dynamically, defaults to 8000 locally)
-EXPOSE 8000
+# Copy built frontend
+COPY --from=frontend-builder /frontend/.next/standalone /app/frontend-server
+COPY --from=frontend-builder /frontend/.next/static /app/frontend-server/.next/static
+COPY --from=frontend-builder /frontend/public /app/frontend-server/public
 
-# Run Uvicorn using the PORT environment variable provided by Cloud Run, falling back to 8000
-CMD uvicorn opscore.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# Supervisor config to run both processes
+COPY supervisord.conf /etc/supervisord.conf
+
+EXPOSE 8080
+
+CMD ["supervisord", "-c", "/etc/supervisord.conf"]

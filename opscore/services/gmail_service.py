@@ -10,21 +10,38 @@ def get_gmail_service(credentials):
     return build("gmail", "v1", credentials=credentials)
 
 
-def _get_email_body(payload: dict) -> str:
-    """Recursively extract plain text from the MIME payload."""
-    body_text = ""
-    # If the payload itself has the body
+def _extract_bodies(payload: dict) -> dict:
+    """Recursively extract both text/plain and text/html from the MIME payload."""
+    result = {"plain": "", "html": ""}
+
+    mime = payload.get("mimeType", "")
+
+    # Direct body data
     if 'data' in payload.get('body', {}):
-        body_text += base64.urlsafe_b64decode(payload['body']['data']).decode("utf-8", errors="ignore")
-    # If it is a multipart payload
+        decoded = base64.urlsafe_b64decode(payload['body']['data']).decode("utf-8", errors="ignore")
+        if mime == "text/html":
+            result["html"] += decoded
+        elif mime == "text/plain":
+            result["plain"] += decoded
+        else:
+            result["plain"] += decoded  # fallback
+
+    # Multipart — recurse into parts
     if 'parts' in payload:
         for part in payload['parts']:
-            if part.get('mimeType') == 'text/plain':
+            part_mime = part.get('mimeType', '')
+            if part_mime == 'text/html':
                 if 'data' in part.get('body', {}):
-                    body_text += base64.urlsafe_b64decode(part['body']['data']).decode("utf-8", errors="ignore")
+                    result["html"] += base64.urlsafe_b64decode(part['body']['data']).decode("utf-8", errors="ignore")
+            elif part_mime == 'text/plain':
+                if 'data' in part.get('body', {}):
+                    result["plain"] += base64.urlsafe_b64decode(part['body']['data']).decode("utf-8", errors="ignore")
             elif 'parts' in part:
-                 body_text += _get_email_body(part) # Recurse
-    return body_text
+                sub = _extract_bodies(part)
+                result["html"] += sub["html"]
+                result["plain"] += sub["plain"]
+
+    return result
 
 
 def fetch_recent_emails(credentials) -> list[dict]:
@@ -46,17 +63,22 @@ def fetch_recent_emails(credentials) -> list[dict]:
         headers = payload.get("headers", [])
         header_map = {header["name"]: header["value"] for header in headers}
         snippet = message.get("snippet", "")
-        
-        full_body = _get_email_body(payload).strip()
-        if not full_body:
-             full_body = snippet # fallback
+
+        bodies = _extract_bodies(payload)
+        html_body = bodies["html"].strip()
+        plain_body = bodies["plain"].strip()
+
+        # 'body' = HTML preferred (for iframe display), 'body_plain' = text (for AI prompts)
+        display_body = html_body or plain_body or snippet
+        text_body = plain_body or snippet
 
         email_summaries.append({
             "from": header_map.get("From", "Unknown"),
             "subject": header_map.get("Subject", "(No Subject)"),
             "date": header_map.get("Date", "Unknown"),
             "snippet": snippet,
-            "body": full_body,
+            "body": display_body,
+            "body_plain": text_body,
         })
 
     return email_summaries

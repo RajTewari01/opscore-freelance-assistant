@@ -58,8 +58,11 @@ const AI_MODELS = [
 export default function Home() {
     const [authStatus, setAuthStatus] = useState<any>(null);
     const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+    const [rawData, setRawData] = useState<RawDataPayload | null>(null);
     const [loading, setLoading] = useState(false);
+    const [dataLoading, setDataLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [errorTimer, setErrorTimer] = useState(15);
     
     // UI States
     const [activeTab, setActiveTab] = useState<'inbox' | 'calendar' | 'sheets'>('inbox');
@@ -75,30 +78,81 @@ export default function Home() {
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({
         gemini: "", openai: "", anthropic: "", grok: ""
     });
+    const [analysisLimit, setAnalysisLimit] = useState(5);
+
+    // Analytics State
+    const [showAnalyticsView, setShowAnalyticsView] = useState(false);
+    const [showTokenWarning, setShowTokenWarning] = useState(false);
+    const [analyticsData, setAnalyticsData] = useState<{priority_items: any[], report: string} | null>(null);
+    const [analyticsLoading, setAnalyticsLoading] = useState(false);
+
+    // Auto-dismiss error after 15 seconds
+    useEffect(() => {
+        if (!error) { setErrorTimer(15); return; }
+        const interval = setInterval(() => {
+            setErrorTimer(prev => {
+                if (prev <= 1) { setError(null); return 15; }
+                return prev - 1;
+            });
+        }, 1000);
+        return () => clearInterval(interval);
+    }, [error]);
 
     // Calendar Modal State
     const [showCalModal, setShowCalModal] = useState(false);
     const [calForm, setCalForm] = useState({ title: '', startDate: '', startTime: '', endDate: '', endTime: '' });
 
-    // Fetch auth status & local storage
+    // Auto-fetch raw data on login — NO AI call
+    const fetchRawData = useCallback(async () => {
+        setDataLoading(true);
+        setError(null);
+        try {
+            const res = await fetch('/api/fetch-data');
+            if (res.status === 401) return;
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || 'Data fetch failed.');
+            }
+            const data = await res.json();
+            setRawData(data);
+            if (data.emails?.length > 0) {
+                setFocusedItem({ type: 'email', data: data.emails[0] });
+            }
+        } catch (err: any) {
+            setError(err.message || 'Failed to load data.');
+        } finally {
+            setDataLoading(false);
+        }
+    }, []);
+
+    // Fetch auth status & auto-load data
     useEffect(() => {
         fetch('/auth/status')
             .then(res => res.json())
-            .then(data => setAuthStatus(data))
+            .then(data => {
+                setAuthStatus(data);
+                if (data.is_authenticated) fetchRawData();
+            })
             .catch(console.error);
         
-        // Load Settings
         setAiProvider(localStorage.getItem("ops_ai_provider") || "gemini/gemini-2.0-flash");
-        try {
-            const keys = JSON.parse(localStorage.getItem("ops_api_keys") || "{}");
-            setApiKeys(prev => ({...prev, ...keys}));
-        } catch (e) {}
-    }, []);
+    }, [fetchRawData]);
 
-    const handleSaveSettings = (e: React.FormEvent) => {
+    const handleSaveSettings = async (e: React.FormEvent) => {
         e.preventDefault();
         localStorage.setItem("ops_ai_provider", aiProvider);
-        localStorage.setItem("ops_api_keys", JSON.stringify(apiKeys));
+        
+        // Save ALL added API keys securely to backend cookies
+        for (const [vendor, key] of Object.entries(apiKeys)) {
+            if (key) {
+                await fetch('/auth/settings/save-key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider: vendor, api_key: key })
+                });
+            }
+        }
+        
         setShowSettingsModal(false);
     };
 
@@ -107,19 +161,25 @@ export default function Home() {
         setApiKeys({...apiKeys, [vendor]: e.target.value});
     };
 
-    const handleAnalyze = useCallback(async () => {
-        setLoading(true);
+    // Analytics — sends raw data to AI for priority ranking + report
+    const handleRunAnalytics = useCallback(async () => {
+        if (!rawData) return;
+        setAnalyticsLoading(true);
         setError(null);
-        setAnalysis(null);
-        setFocusedItem(null);
-        setActionResult(null);
+        setShowTokenWarning(false);
         try {
-            const response = await fetch('/api/analyze', { 
+            const response = await fetch('/api/analytics', { 
                 method: 'POST',
                 headers: {
-                    'x-ai-provider': aiProvider,
-                    'x-ai-key': apiKeys[aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider] || ''
-                }
+                    'Content-Type': 'application/json',
+                    'x-ai-provider': aiProvider
+                },
+                body: JSON.stringify({
+                    emails: rawData.emails || [],
+                    calendar: rawData.calendar || [],
+                    drive: rawData.drive || [],
+                    limit: analysisLimit
+                })
             });
             if (response.status === 401) {
                 setError('Session expired. Please sign in again.');
@@ -128,20 +188,17 @@ export default function Home() {
             }
             if (!response.ok) {
                 const errData = await response.json().catch(()=>({}));
-                throw new Error(errData.error || "Fetch failed.");
+                throw new Error(errData.error || "Analytics failed.");
             }
             const data = await response.json();
-            setAnalysis(data);
-            
-            if (data.raw_data?.emails?.length > 0) {
-                setFocusedItem({ type: 'email', data: data.raw_data.emails[0] });
-            }
+            setAnalyticsData(data);
+            setShowAnalyticsView(true);
         } catch (err: any) {
             setError(err.message || 'Network error.');
         } finally {
-            setLoading(false);
+            setAnalyticsLoading(false);
         }
-    }, [aiProvider, apiKeys]);
+    }, [aiProvider, rawData, analysisLimit]);
 
     const handleAction = async (actionType: string, overrideContext?: string) => {
         if (!focusedItem) return;
@@ -154,8 +211,7 @@ export default function Home() {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
-                    'x-ai-provider': aiProvider,
-                    'x-ai-key': apiKeys[aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider] || ''
+                    'x-ai-provider': aiProvider
                 },
                 body: JSON.stringify({
                     action_type: actionType,
@@ -205,9 +261,8 @@ export default function Home() {
             const response = await fetch('/api/action', {
                 method: 'POST',
                 headers: { 
-                    'Content-Type': 'application/json' ,
-                    'x-ai-provider': aiProvider,
-                    'x-ai-key': apiKeys[aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider] || ''
+                    'Content-Type': 'application/json',
+                    'x-ai-provider': aiProvider
                 },
                 body: JSON.stringify({
                     action_type: 'dispatch',
@@ -322,12 +377,64 @@ export default function Home() {
                                             )}
                                         </AnimatePresence>
                                     </div>
+                                    <div className="space-y-2">
+                                        {Object.entries(apiKeys).filter(([_, v]) => v).map(([vendor, key]) => (
+                                            <div key={vendor} className="flex items-center gap-2 bg-white/[0.03] border border-white/5 rounded-lg p-2">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 w-20 shrink-0">{vendor}</span>
+                                                <span className="flex-1 text-xs text-zinc-500 font-mono truncate">{'•'.repeat(8)}{key.slice(-4)}</span>
+                                                <button type="button" onClick={() => setApiKeys({...apiKeys, [vendor]: ''})} className="text-zinc-600 hover:text-red-400 transition-colors p-1"><X className="w-3.5 h-3.5" /></button>
+                                            </div>
+                                        ))}
+                                        {/* Add key for current provider */}
+                                        <div className="flex items-center gap-2 mt-1">
+                                            <span className="text-[10px] font-bold uppercase tracking-wider text-primary w-20 shrink-0">{(aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider)}</span>
+                                            <input 
+                                                id="new-key-value"
+                                                type="password" 
+                                                placeholder={`Paste ${(aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider)} key...`}
+                                                className="flex-1 bg-black/40 border border-white/10 rounded-lg px-2.5 py-2 text-xs text-white font-mono outline-none focus:border-primary/50"
+                                            />
+                                            <button 
+                                                type="button"
+                                                onClick={() => {
+                                                    const inp = document.getElementById('new-key-value') as HTMLInputElement;
+                                                    const vendor = aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider;
+                                                    if (inp.value) {
+                                                        setApiKeys({...apiKeys, [vendor]: inp.value});
+                                                        inp.value = '';
+                                                    }
+                                                }}
+                                                className="bg-primary/20 hover:bg-primary/30 text-primary px-3 py-2 rounded-lg text-xs font-bold transition-colors shrink-0"
+                                            >
+                                                <Plus className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                        <p className="text-[10px] text-zinc-600 mt-1">Select a model above, paste its key, and click +. Add keys for multiple providers for failover.</p>
+                                    </div>
+                                </div>
+
+                                {/* Analysis Limit */}
+                                <div className="space-y-3">
+                                    <h3 className="text-sm font-semibold tracking-wide text-zinc-400 uppercase border-b border-white/5 pb-2">Analytics Scope</h3>
                                     <div>
-                                        <label className="text-xs font-bold text-zinc-500 uppercase flex justify-between mb-1">
-                                            <span>API Key for {aiProvider.includes('/') ? aiProvider.split('/')[0].toUpperCase() : aiProvider.toUpperCase()}</span>
+                                        <label className="text-xs font-bold text-zinc-500 uppercase flex justify-between mb-2">
+                                            <span>Items to Analyze</span>
+                                            <input 
+                                                type="number" min="1" max="50" value={analysisLimit}
+                                                onChange={e => setAnalysisLimit(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))}
+                                                className="w-14 bg-black/40 border border-white/10 rounded px-2 py-0.5 text-primary font-mono text-right text-sm outline-none focus:border-primary/50"
+                                            />
                                         </label>
-                                        <input type="password" value={apiKeys[aiProvider.includes('/') ? aiProvider.split('/')[0] : aiProvider] || ''} onChange={handleKeyChange} className="w-full bg-black/40 border border-white/10 rounded-lg p-2.5 text-white text-sm focus:border-primary/50 outline-none transition-all font-mono" placeholder="Set connection string..." />
-                                        <p className="text-[10px] text-zinc-500 mt-2">API keys are securely isolated in your browser's local cache and are cleared when you log out.</p>
+                                        <input 
+                                            type="range" min="1" max="50" value={analysisLimit} 
+                                            onChange={e => setAnalysisLimit(parseInt(e.target.value))} 
+                                            className="w-full accent-primary" 
+                                        />
+                                        <div className="flex justify-between text-[10px] text-zinc-600 mt-1">
+                                            <span>1 (Low cost)</span>
+                                            <span>50 (High cost)</span>
+                                        </div>
+                                        <p className="text-[10px] text-zinc-500 mt-2">Controls how many emails/events are sent to the AI for priority analysis. Higher = more tokens consumed.</p>
                                     </div>
                                 </div>
 
@@ -336,6 +443,44 @@ export default function Home() {
                                     <button type="submit" className="px-6 py-2.5 rounded-xl bg-white text-black hover:bg-zinc-200 text-sm font-bold shadow-lg transition-all">Save Changes</button>
                                 </div>
                             </form>
+                        </motion.div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
+
+            {/* TOKEN WARNING POPUP */}
+            <AnimatePresence>
+                {showTokenWarning && (
+                    <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-md flex items-center justify-center p-4">
+                        <motion.div initial={{scale:0.95}} animate={{scale:1}} exit={{scale:0.95}} className="glass-panel p-8 max-w-md w-full shadow-[0_0_60px_rgba(234,88,12,0.2)] border-primary/20">
+                            <div className="flex items-center gap-3 mb-4">
+                                <div className="w-10 h-10 rounded-xl bg-primary/20 flex items-center justify-center">
+                                    <Zap className="w-5 h-5 text-primary" />
+                                </div>
+                                <h2 className="text-xl font-bold text-white">AI Token Usage Warning</h2>
+                            </div>
+                            <p className="text-zinc-400 text-sm mb-2">You're about to analyze <span className="text-primary font-bold">{analysisLimit} items</span> across emails, calendar, and drive.</p>
+                            <div className="bg-primary/5 border border-primary/20 rounded-xl p-4 mb-6">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs text-zinc-500">Items to analyze</span>
+                                    <span className="text-sm font-bold text-primary">{analysisLimit}</span>
+                                </div>
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-xs text-zinc-500">Est. token cost</span>
+                                    <span className="text-sm font-bold text-yellow-400">{analysisLimit <= 5 ? 'Low' : analysisLimit <= 12 ? 'Medium' : 'High'}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-zinc-500">Model</span>
+                                    <span className="text-sm text-zinc-300">{AI_MODELS.flatMap(g => g.models).find(m => m.id === aiProvider)?.name || aiProvider}</span>
+                                </div>
+                            </div>
+                            <p className="text-[11px] text-zinc-500 mb-6">💡 Tip: Reduce the scope in Settings to save tokens. You can always analyze individual items on-demand.</p>
+                            <div className="flex justify-end gap-3">
+                                <button onClick={() => setShowTokenWarning(false)} className="px-4 py-2.5 rounded-xl text-sm text-zinc-400 hover:text-white transition-colors">Cancel</button>
+                                <button onClick={handleRunAnalytics} disabled={analyticsLoading} className="px-6 py-2.5 rounded-xl bg-primary hover:bg-orange-500 text-white text-sm font-bold shadow-lg shadow-primary/20 transition-all flex items-center gap-2 disabled:opacity-50">
+                                    <Zap className="w-4 h-4" /> Run Analysis
+                                </button>
+                            </div>
                         </motion.div>
                     </motion.div>
                 )}
@@ -396,9 +541,10 @@ export default function Home() {
                         <span className="absolute left-[120%] bg-zinc-800 text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Command Center</span>
                     </button>
                     
-                    <button className="w-12 h-12 rounded-xl text-zinc-500 hover:text-white hover:bg-white/5 flex items-center justify-center transition-all group relative">
+                    <button onClick={() => setShowAnalyticsView(!showAnalyticsView)} className={`w-12 h-12 rounded-xl flex items-center justify-center transition-all group relative ${showAnalyticsView ? 'text-primary bg-primary/10' : 'text-zinc-500 hover:text-white hover:bg-white/5'}`}>
                         <BarChart2 className="w-5 h-5 group-hover:scale-110 transition-transform" />
                         <span className="absolute left-[120%] bg-zinc-800 text-xs px-2 py-1 rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Analytics</span>
+                        {analyticsData && <span className="absolute -top-1 -right-1 w-3 h-3 bg-primary rounded-full animate-pulse" />}
                     </button>
                     
                     <button onClick={() => setShowSettingsModal(true)} className="w-12 h-12 rounded-xl text-zinc-500 hover:text-primary hover:bg-primary/10 flex items-center justify-center transition-all group relative">
@@ -426,7 +572,7 @@ export default function Home() {
                 <nav className="h-16 flex items-center justify-between px-8 shrink-0 border-b border-white/5">
                     <span className="text-xl font-bold tracking-tight text-white/90">OpsCore Control</span>
                     <div className="flex items-center gap-6">
-                        {loading && <div className="flex items-center gap-2 text-primary font-bold text-xs uppercase tracking-widest animate-pulse"><Loader2 className="w-4 h-4 animate-spin" /> Deep Syncing...</div>}
+                        {(loading || dataLoading) && <div className="flex items-center gap-2 text-primary font-bold text-xs uppercase tracking-widest animate-pulse"><Loader2 className="w-4 h-4 animate-spin" /> {dataLoading ? 'Loading Data...' : 'AI Analyzing...'}</div>}
                         
                     </div>
                 </nav>
@@ -439,15 +585,15 @@ export default function Home() {
                         <div className="flex items-center justify-between">
                             <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Data Ecosystem</h2>
                             <button
-                                onClick={handleAnalyze}
-                                disabled={loading}
-                                className="flex items-center gap-2 bg-primary/10 text-primary hover:bg-primary/20 px-4 py-1.5 rounded-lg text-sm font-semibold transition-all shadow-[inset_0_0_10px_rgba(234,88,12,0.1)]"
-                            >
-                                <Search className="w-4 h-4" /> Fetch Global
-                            </button>
+                                    onClick={fetchRawData}
+                                    disabled={dataLoading}
+                                    className="flex items-center gap-2 bg-white/5 text-zinc-300 hover:bg-white/10 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all border border-white/10"
+                                >
+                                    <Search className="w-4 h-4" /> Refresh
+                                </button>
                         </div>
 
-                        <div className={`glass-panel flex-1 flex flex-col overflow-hidden transition-all duration-500 ${loading ? 'shadow-[inset_0_0_60px_rgba(234,88,12,0.15)] border-primary/30' : ''}`}>
+                        <div className={`glass-panel flex-1 flex flex-col overflow-hidden transition-all duration-500 ${dataLoading ? 'shadow-[inset_0_0_60px_rgba(234,88,12,0.15)] border-primary/30' : ''}`}>
                             {/* Tab Heads */}
                             <div className="flex border-b border-white/5 p-2 gap-2 bg-black/20">
                                 {[  { id: 'inbox', icon: Mail, label: 'Inbox' },
@@ -456,38 +602,39 @@ export default function Home() {
                                 ].map(tab => (
                                     <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-xl text-sm font-medium transition-all ${activeTab === tab.id ? 'bg-white/10 text-white shadow-sm' : 'text-zinc-500 hover:text-zinc-300 hover:bg-white/5'}`}>
                                         <tab.icon className="w-4 h-4" /> {tab.label}
+                                        {tab.id === 'inbox' && rawData?.emails && <span className="text-[10px] bg-primary/20 text-primary px-1.5 py-0.5 rounded-full">{rawData.emails.length}</span>}
                                     </button>
                                 ))}
                             </div>
 
                             {/* Tab Body */}
                             <div className="flex-1 overflow-y-auto p-4 space-y-3 relative">
-                                {loading && !analysis && (
+                                {dataLoading && !rawData && (
                                     <div className="absolute inset-0 z-10 bg-black/40 backdrop-blur-sm flex flex-col items-center justify-center text-primary/80">
                                         <Loader2 className="w-10 h-10 animate-spin mb-4" />
-                                        <span className="text-sm font-bold uppercase tracking-wider">Syncing Pipelines</span>
+                                        <span className="text-sm font-bold uppercase tracking-wider">Loading Data...</span>
                                     </div>
                                 )}
 
-                                {!analysis && !loading ? (
+                                {!rawData && !dataLoading ? (
                                     <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-4">
                                         <Database className="w-12 h-12 opacity-20" />
-                                        <p className="text-sm text-center max-w-[200px]">Click "Fetch Global" to ingest massive scale context.</p>
+                                        <p className="text-sm text-center max-w-[200px]">Connecting to your workspace...</p>
                                     </div>
-                                ) : analysis && (
+                                ) : rawData && (
                                     <AnimatePresence mode="popLayout">
-                                        {activeTab === 'inbox' && analysis.raw_data.emails.map((email: any, i: number) => (
+                                        {activeTab === 'inbox' && rawData.emails.map((email: any, i: number) => (
                                             <motion.button key={i} onClick={() => { setFocusedItem({type: 'email', data: email}); setActionResult(null); }} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }} className={`w-full text-left p-4 rounded-xl border transition-all ${focusedItem?.data === email ? 'bg-primary/10 border-primary/40 shadow-[inset_0_0_20px_rgba(234,88,12,0.2)]' : 'bg-white/[0.02] border-white/5 hover:bg-white/5'}`}>
                                                 <div className="flex justify-between items-start mb-1">
-                                                    <span className={`font-semibold truncate text-sm ${focusedItem?.data === email ? 'text-primary' : 'text-white/90'}`}>{email.from.split('<')[0]}</span>
-                                                    <span className="text-xs text-zinc-500 ml-2 whitespace-nowrap">{email.date.split(',')[1]?.split(' ')[1] || 'Today'}</span>
+                                                    <span className={`font-semibold truncate text-sm ${focusedItem?.data === email ? 'text-primary' : 'text-white/90'}`}>{email.from?.split('<')[0]}</span>
+                                                    <span className="text-xs text-zinc-500 ml-2 whitespace-nowrap">{email.date?.split(',')[1]?.split(' ')[1] || 'Today'}</span>
                                                 </div>
                                                 <h4 className="text-sm text-zinc-300 font-medium truncate mb-2">{email.subject}</h4>
                                                 <p className="text-xs text-zinc-500 line-clamp-2">{email.snippet}</p>
                                             </motion.button>
                                         ))}
 
-                                        {activeTab === 'calendar' && analysis.raw_data.calendar.map((event: any, i: number) => (
+                                        {activeTab === 'calendar' && rawData.calendar.map((event: any, i: number) => (
                                             <motion.button key={i} onClick={() => { setFocusedItem({type: 'event', data: event}); setActionResult(null); }} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.05 }} className={`w-full text-left p-4 rounded-xl border flex items-start gap-4 transition-all ${focusedItem?.data === event ? 'bg-orange-500/10 border-orange-500/40 shadow-[inset_0_0_20px_rgba(249,115,22,0.2)]' : 'bg-white/[0.02] border-white/5 hover:bg-white/5'}`}>
                                                 <div className="w-10 h-10 rounded-lg bg-orange-500/10 flex flex-col items-center justify-center text-orange-400 shrink-0">
                                                     <span className="text-[10px] font-bold uppercase">{event.start?.split('T')[0]?.split('-')[1]}</span>
@@ -502,15 +649,15 @@ export default function Home() {
 
                                         {activeTab === 'sheets' && (
                                             <div className="space-y-4">
-                                                {analysis.raw_data.sheets && (
-                                                    <motion.button onClick={() => { setFocusedItem({type: 'sheet', data: analysis.raw_data.sheets}); setActionResult(null); }} className={`w-full text-left p-4 rounded-xl border transition-all ${focusedItem?.data === analysis.raw_data.sheets ? 'bg-green-500/10 border-green-500/40 shadow-[inset_0_0_20px_rgba(34,197,94,0.2)]' : 'bg-white/[0.02] border-white/5 hover:bg-white/5'}`}>
-                                                        <h4 className={`text-sm font-medium mb-3 flex items-center gap-2 ${focusedItem?.data === analysis.raw_data.sheets ? 'text-green-400' : 'text-zinc-300'}`}><Database className="w-4 h-4"/> {analysis.raw_data.sheets.name}</h4>
+                                                {rawData.sheets && (
+                                                    <motion.button onClick={() => { setFocusedItem({type: 'sheet', data: rawData.sheets}); setActionResult(null); }} className={`w-full text-left p-4 rounded-xl border transition-all ${focusedItem?.data === rawData.sheets ? 'bg-green-500/10 border-green-500/40 shadow-[inset_0_0_20px_rgba(34,197,94,0.2)]' : 'bg-white/[0.02] border-white/5 hover:bg-white/5'}`}>
+                                                        <h4 className={`text-sm font-medium mb-3 flex items-center gap-2 ${focusedItem?.data === rawData.sheets ? 'text-green-400' : 'text-zinc-300'}`}><Database className="w-4 h-4"/> {rawData.sheets.name}</h4>
                                                         <p className="text-xs text-zinc-500 mb-2">Spreadsheet data available for Graphification.</p>
-                                                        <div className="overflow-hidden h-[60px] opacity-50"><table className="w-full text-left text-[10px]"><tbody>{analysis.raw_data.sheets.data.slice(0,3).map((row: any, rId: number) => (<tr key={rId} className="border-b border-white/5">{row.slice(0,4).map((cell: any, cId: number) => (<td key={cId} className="p-1 truncate max-w-[60px] text-zinc-400">{cell}</td>))}</tr>))}</tbody></table></div>
+                                                        <div className="overflow-hidden h-[60px] opacity-50"><table className="w-full text-left text-[10px]"><tbody>{rawData.sheets.data?.slice(0,3).map((row: any, rId: number) => (<tr key={rId} className="border-b border-white/5">{row.slice(0,4).map((cell: any, cId: number) => (<td key={cId} className="p-1 truncate max-w-[60px] text-zinc-400">{cell}</td>))}</tr>))}</tbody></table></div>
                                                     </motion.button>
                                                 )}
                                                 <h4 className="text-xs font-bold uppercase text-zinc-600 mt-6 mb-2 text-left">Recent Drive Files</h4>
-                                                {analysis.raw_data.drive.map((file: any, i: number) => (
+                                                {rawData.drive.map((file: any, i: number) => (
                                                     <motion.button key={i} onClick={() => { setFocusedItem({type: 'drive', data: file}); setActionResult(null); }} className={`w-full p-3 rounded-lg border flex items-center gap-3 transition-all ${focusedItem?.data === file ? 'bg-blue-500/10 border-blue-500/40' : 'bg-white/[0.02] border-white/5 hover:bg-white/5'}`}>
                                                         <FileText className="w-4 h-4 text-blue-400" />
                                                         <p className="text-sm text-white/80 truncate flex-1 min-w-0">{file.name}</p>
@@ -524,7 +671,130 @@ export default function Home() {
                         </div>
                     </div>
 
-                    {/* RIGHT PANEL: Dynamic Action View */}
+                    {/* RIGHT PANEL: Dynamic Action View or Analytics Full Page */}
+                    {showAnalyticsView ? (
+                        /* ========== FULL ANALYTICS PAGE ========== */
+                        <div className="flex-1 flex flex-col overflow-hidden">
+                            <div className="flex items-center justify-between mb-6">
+                                <div>
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-primary font-bold uppercase tracking-wider text-xs bg-primary/10 px-2 py-1 rounded">Analytics Engine</span>
+                                        {analyticsLoading && <span className="text-zinc-400 text-xs flex items-center gap-1 animate-pulse"><Loader2 className="w-3 h-3 animate-spin"/> Processing...</span>}
+                                    </div>
+                                    <h1 className="text-3xl font-bold tracking-tighter text-white">Priority Intelligence</h1>
+                                    <p className="text-zinc-500 text-sm">AI-powered workload analysis across {analysisLimit} items per source.</p>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <button onClick={() => setShowAnalyticsView(false)} className="px-4 py-2 text-sm text-zinc-400 hover:text-white border border-white/10 rounded-xl transition-colors flex items-center gap-2">
+                                        <ArrowRight className="w-4 h-4 rotate-180" /> Back to Workspace
+                                    </button>
+                                    <button onClick={() => setShowTokenWarning(true)} disabled={analyticsLoading || !rawData} className="px-4 py-2 bg-primary/20 hover:bg-primary/30 border border-primary/30 text-primary text-sm font-bold rounded-xl flex items-center gap-2 transition-all disabled:opacity-40">
+                                        <Zap className="w-4 h-4" /> {analyticsData ? 'Re-Analyze' : 'Run Analysis'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {!analyticsData && !analyticsLoading ? (
+                                <div className="flex-1 flex flex-col items-center justify-center glass-panel shadow-[inset_0_0_100px_rgba(0,0,0,0.5)] border-white/5">
+                                    <div className="w-20 h-20 rounded-2xl bg-primary/10 flex items-center justify-center mb-6">
+                                        <BarChart2 className="w-10 h-10 text-primary/60" />
+                                    </div>
+                                    <h2 className="text-2xl font-bold text-zinc-600 mb-2">No Analysis Yet</h2>
+                                    <p className="text-zinc-500 text-center max-w-sm mb-6">Click "Run Analysis" to send your workspace data to AI for priority ranking and report generation.</p>
+                                    <div className="flex items-center gap-2 text-xs text-zinc-600">
+                                        <span>Scope: {analysisLimit} items</span>
+                                        <span>·</span>
+                                        <span>Cost: {analysisLimit <= 5 ? 'Low' : analysisLimit <= 12 ? 'Medium' : 'High'}</span>
+                                        <span>·</span>
+                                        <button onClick={() => setShowSettingsModal(true)} className="text-primary hover:underline">Adjust in Settings</button>
+                                    </div>
+                                </div>
+                            ) : analyticsLoading ? (
+                                <div className="flex-1 flex flex-col items-center justify-center glass-panel">
+                                    <Loader2 className="w-12 h-12 animate-spin text-primary mb-4" />
+                                    <span className="text-sm font-bold uppercase tracking-wider text-primary/80">AI is analyzing {analysisLimit} items...</span>
+                                    <p className="text-xs text-zinc-500 mt-2">This may take a few seconds depending on your plan.</p>
+                                </div>
+                            ) : analyticsData && (
+                                <div className="flex-1 overflow-y-auto space-y-6 form-custom-scrollbar pr-2">
+                                    {/* Error bar */}
+                                    {error && (
+                                        <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center gap-3 text-red-400 text-sm">
+                                            <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                                            <span className="flex-1">{error}</span>
+                                            <span className="text-[10px] font-mono bg-red-500/20 px-2 py-0.5 rounded text-red-300 shrink-0">{errorTimer}s</span>
+                                            <button onClick={() => setError(null)} className="text-red-400 hover:text-white transition-colors shrink-0"><X className="w-4 h-4" /></button>
+                                        </motion.div>
+                                    )}
+
+                                    {/* Priority Items Grid */}
+                                    <div className="glass-panel p-6 border-white/5">
+                                        <h3 className="text-xs font-bold uppercase tracking-wider text-primary mb-4 flex items-center gap-2"><Zap className="w-3.5 h-3.5" /> Priority Queue — {analyticsData.priority_items.length} Items Ranked</h3>
+                                        <div className="space-y-3">
+                                            {analyticsData.priority_items.map((item: any, i: number) => (
+                                                <motion.button
+                                                    key={i}
+                                                    initial={{ opacity: 0, x: -10 }}
+                                                    animate={{ opacity: 1, x: 0 }}
+                                                    transition={{ delay: i * 0.05 }}
+                                                    onClick={() => {
+                                                        // Navigate back to main view and focus the source item
+                                                        if (item.source === 'email' && rawData?.emails?.[item.source_index]) {
+                                                            setFocusedItem({ type: 'email', data: rawData.emails[item.source_index] });
+                                                            setActiveTab('inbox');
+                                                        } else if (item.source === 'calendar' && rawData?.calendar?.[item.source_index]) {
+                                                            setFocusedItem({ type: 'event', data: rawData.calendar[item.source_index] });
+                                                            setActiveTab('calendar');
+                                                        } else if (item.source === 'drive' && rawData?.drive?.[item.source_index]) {
+                                                            setFocusedItem({ type: 'drive', data: rawData.drive[item.source_index] });
+                                                            setActiveTab('sheets');
+                                                        }
+                                                        setShowAnalyticsView(false);
+                                                        setActionResult(null);
+                                                    }}
+                                                    className={`w-full text-left p-4 rounded-xl border transition-all hover:scale-[1.01] cursor-pointer ${
+                                                        item.urgency === 'high' ? 'bg-red-500/5 border-red-500/20 hover:border-red-500/40' :
+                                                        item.urgency === 'medium' ? 'bg-yellow-500/5 border-yellow-500/20 hover:border-yellow-500/40' :
+                                                        'bg-green-500/5 border-green-500/20 hover:border-green-500/40'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-start gap-3">
+                                                        <span className={`text-xs font-bold w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                                                            item.urgency === 'high' ? 'bg-red-500/20 text-red-400' :
+                                                            item.urgency === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                            'bg-green-500/20 text-green-400'
+                                                        }`}>#{item.rank}</span>
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <h4 className="text-sm font-semibold text-white truncate">{item.title}</h4>
+                                                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase font-bold ${
+                                                                    item.urgency === 'high' ? 'bg-red-500/20 text-red-400' :
+                                                                    item.urgency === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
+                                                                    'bg-green-500/20 text-green-400'
+                                                                }`}>{item.urgency}</span>
+                                                                <span className="text-[10px] bg-white/5 text-zinc-500 px-1.5 py-0.5 rounded">{item.source}</span>
+                                                            </div>
+                                                            <p className="text-xs text-zinc-400">{item.reason}</p>
+                                                        </div>
+                                                        <ArrowRight className="w-4 h-4 text-zinc-600 shrink-0 mt-1" />
+                                                    </div>
+                                                </motion.button>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* AI Report */}
+                                    <div className="glass-panel p-6 border-white/5">
+                                        <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-500 mb-4 flex items-center gap-2"><FileText className="w-3.5 h-3.5" /> AI Workload Report</h3>
+                                        <div className="text-zinc-300 text-sm leading-relaxed prose prose-invert prose-orange max-w-none prose-sm">
+                                            <ReactMarkdown>{analyticsData.report}</ReactMarkdown>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                    /* ========== NORMAL RIGHT PANEL ========== */
                     <div className={`flex-1 flex flex-col overflow-hidden relative rounded-3xl pb-2 transition-all duration-700 ${loading ? 'opacity-30 blur-sm scale-95' : 'opacity-100 blur-0 scale-100'}`}>
                         
                         {!focusedItem ? (
@@ -564,9 +834,17 @@ export default function Home() {
 
                                 {/* Result Display Area */}
                                 {error && (
-                                    <div className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex gap-3 text-red-400 text-sm">
-                                        <AlertTriangle className="w-5 h-5 flex-shrink-0" /> {error}
-                                    </div>
+                                    <motion.div 
+                                        initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+                                        className="mb-6 p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-center gap-3 text-red-400 text-sm"
+                                    >
+                                        <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+                                        <span className="flex-1">{error}</span>
+                                        <span className="text-[10px] font-mono bg-red-500/20 px-2 py-0.5 rounded text-red-300 shrink-0">{errorTimer}s</span>
+                                        <button onClick={() => setError(null)} className="text-red-400 hover:text-white transition-colors shrink-0">
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </motion.div>
                                 )}
 
                                 <div className="flex-1 overflow-y-auto space-y-6 form-custom-scrollbar pr-2">
@@ -574,7 +852,18 @@ export default function Home() {
                                     {!actionResult && !actionLoading && focusedItem.type === 'email' && (
                                         <div className="glass-panel p-6 border-white/5 shadow-[inset_0_0_30px_rgba(255,255,255,0.02)]">
                                             <h3 className="text-zinc-500 font-bold text-xs uppercase mb-4">Full Content Readout</h3>
-                                            <p className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">{focusedItem.data.body || focusedItem.data.snippet}</p>
+                                            <iframe
+                                                srcDoc={(() => {
+                                                    const raw = focusedItem.data.body || focusedItem.data.snippet || '';
+                                                    const isHtml = /<\s*(html|div|p|table|br|span|a|img)\b/i.test(raw);
+                                                    if (isHtml) return raw;
+                                                    // Wrap plain text in styled HTML
+                                                    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;line-height:1.6;color:#333;padding:20px;margin:0;word-wrap:break-word;white-space:pre-wrap;}</style></head><body>${raw.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</body></html>`;
+                                                })()}
+                                                sandbox=""
+                                                className="w-full min-h-[400px] rounded-xl border border-white/10 bg-white"
+                                                style={{ colorScheme: 'light' }}
+                                            />
                                         </div>
                                     )}
 
@@ -647,6 +936,7 @@ export default function Home() {
                             </motion.div>
                         )}
                     </div>
+                    )}
                 </div>
             </div>
         </div>

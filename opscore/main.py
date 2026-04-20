@@ -10,6 +10,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from opscore.config import settings
 from opscore.routes import auth, assistant
+from opscore.database import init_db
 
 app = FastAPI(
     title="OpsCore — Smart Freelance Ops Assistant",
@@ -24,10 +25,10 @@ app.add_middleware(
     max_age=3600,
 )
 
-# CORS restricted to localhost only (S6)
+# CORS for both backend and Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000"],
+    allow_origins=["http://localhost:8000", "http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,6 +37,9 @@ app.add_middleware(
 # Include route modules
 app.include_router(auth.router)
 app.include_router(assistant.router)
+
+# Initialize database tables on startup
+init_db()
 
 @app.get("/")
 async def serve_frontend():

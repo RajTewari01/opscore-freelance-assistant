@@ -4,15 +4,65 @@ import os
 
 # Allow OAuth2 over HTTP for local development (production must use HTTPS)
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
 
 from fastapi import APIRouter, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from google_auth_oauthlib.flow import Flow
+from itsdangerous import URLSafeTimedSerializer
+from pydantic import BaseModel
 
 from opscore.config import settings
 from opscore.models.schemas import AuthStatus
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Encrypted key serializer for HttpOnly cookie storage
+_serializer = URLSafeTimedSerializer(settings.APP_SECRET_KEY)
+
+
+def encrypt_key(api_key: str) -> str:
+    """Encrypt an API key for secure cookie storage."""
+    return _serializer.dumps(api_key)
+
+
+def decrypt_key(token: str) -> str | None:
+    """Decrypt an API key from cookie storage. Returns None if expired/invalid."""
+    try:
+        return _serializer.loads(token, max_age=28800)  # 8 hour expiry
+    except Exception:
+        return None
+
+
+class SaveKeyRequest(BaseModel):
+    provider: str
+    api_key: str
+
+
+@router.post("/settings/save-key")
+async def save_api_key(body: SaveKeyRequest):
+    """Store encrypted API key in HttpOnly cookie."""
+    encrypted = encrypt_key(body.api_key)
+    response = JSONResponse(content={"status": "saved"})
+    response.set_cookie(
+        key=f"key_{body.provider}",
+        value=encrypted,
+        httponly=True,
+        secure=False,       # Set True in production with HTTPS
+        samesite="lax",
+        max_age=28800,      # 8 hours
+    )
+    return response
+
+
+@router.post("/settings/clear-key")
+async def clear_api_key(request: Request):
+    """Remove API key cookie for a provider."""
+    body = await request.json()
+    provider = body.get("provider", "gemini")
+    response = JSONResponse(content={"status": "cleared"})
+    response.delete_cookie(key=f"key_{provider}")
+    return response
 
 
 def _build_flow() -> Flow:

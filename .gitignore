@@ -45,3 +45,6 @@ test_models.py
 
 # md
 prompt.md
+update_prompt.md
+opscore_history.db
+update_prompt.md
