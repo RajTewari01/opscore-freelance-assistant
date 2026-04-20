@@ -40,25 +40,65 @@ OpsCore uses a **4-agent orchestration pipeline** coordinated by `asyncio.gather
 
 ## 📐 Architecture
 
-```
-┌─────────────────────────────────────────────────┐
-│              Next.js 14 Frontend                │
-│   Dashboard │ Analytics │ Settings │ Actions    │
-└──────────────────┬──────────────────────────────┘
-                   │ HTTP + Cookies (HttpOnly)
-┌──────────────────▼──────────────────────────────┐
-│              FastAPI Backend                    │
-│  ┌─────────────────────────────────────────┐   │
-│  │           OpsOrchestrator               │   │
-│  │  EmailAgent │ CalendarAgent │ ReportAgent│   │
-│  └──────┬──────────────┬───────────────────┘   │
-│         │              │                        │
-│  Google APIs      LiteLLM Router               │
-│  Gmail │ Calendar  Gemini │ GPT-4o │ Claude    │
-│  Drive │ Sheets    Grok │ Mistral │ DeepSeek   │
-│         │                                      │
-│    SQLite DB (Historical Analysis Cache)       │
-└─────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    classDef frontend fill:#0ea5e9,stroke:#0284c7,stroke-width:2px,color:#fff;
+    classDef backend fill:#10b981,stroke:#059669,stroke-width:2px,color:#fff;
+    classDef ai fill:#8b5cf6,stroke:#7c3aed,stroke-width:2px,color:#fff;
+    classDef gcp fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:#fff;
+    classDef db fill:#64748b,stroke:#475569,stroke-width:2px,color:#fff;
+
+    client[Browser / Mobile Client] -->|HTTP + Cookies| FE
+    
+    subgraph FE[Next.js 14 Frontend]
+        direction LR
+        Dashboard
+        Analytics
+        Settings
+        Actions
+    end
+
+    FE -->|HTTP API| BE
+
+    subgraph BE[FastAPI Backend - opscore]
+        direction TB
+        orch[OpsOrchestrator]
+        
+        subgraph Agents [Agent Layer]
+            direction LR
+            email[EmailAgent]
+            cal[CalendarAgent]
+            rep[ReportAgent]
+        end
+        
+        orch --> Agents
+    end
+
+    Agents -->|Read/Write| GCP[Google Workspace APIs]
+    Agents -->|Reasoning Engine| LLM[LiteLLM Router]
+    
+    subgraph GCP[Google Workspace APIs]
+        direction LR
+        Gmail
+        Calendar
+        Drive
+        Sheets
+    end
+
+    subgraph LLM[LiteLLM Router]
+        direction LR
+        Gemini[Gemini 2.5]
+        GPT[GPT-4o]
+        Claude[Claude 3.5]
+    end
+
+    orch -->|Save/Load Cache| DB[(SQLite DB)]
+
+    class FE,Dashboard,Analytics,Settings,Actions frontend;
+    class BE,orch,email,cal,rep backend;
+    class LLM,Gemini,GPT,Claude ai;
+    class GCP,Gmail,Calendar,Drive,Sheets gcp;
+    class DB db;
 ```
 
 Data flow:
