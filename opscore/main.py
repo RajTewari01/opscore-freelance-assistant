@@ -46,6 +46,15 @@ async def serve_frontend():
     """Return an API healthcheck; the Next.js frontend is served separately."""
     return {"message": "OpsCore AI API is actively serving."}
 
+import traceback
+from fastapi.responses import PlainTextResponse
+from starlette.requests import Request
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # This will return the exact Python crash traceback to the browser for debugging
+    return PlainTextResponse(str(traceback.format_exc()), status_code=500)
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
