@@ -3,7 +3,7 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /frontend
 COPY frontend/package*.json ./
-RUN npm ci
+RUN npm install
 COPY frontend/ ./
 
 # Production build — outputs standalone server
