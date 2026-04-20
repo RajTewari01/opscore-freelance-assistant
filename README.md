@@ -119,47 +119,38 @@ Open **http://localhost:3000**, sign in with Google, add your AI key in Settings
 
 ---
 
-## 🚀 Cloud Deployment (Google Cloud Run)
+## 🚀 Cloud Deployment (Render)
 
-### 1. Build & Push Docker Image
+Render is the recommended deployment platform as it natively supports the Dockerized Next.js + FastAPI architecture with zero configuration.
 
-```bash
-# Authenticate with GCP
-gcloud auth login
-gcloud config set project YOUR_PROJECT_ID
+### 1. Deploy on Render
 
-# Build and push
-gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/opscore
+1. Create a new **Web Service** on [Render](https://render.com)
+2. Connect your GitHub repository.
+3. Use the **Docker** runtime environment.
+4. Set the **Instance Type** to Free (0.1 CPU, 512 MB).
+
+### 2. Configure Environment Variables
+
+In your Render dashboard, navigate to **Environment** and add the following variables. Note the specific value for `BACKEND_URL` which forces IPv4 loopback to avoid Node.js IPv6 resolution issues:
+
+```env
+GOOGLE_CLIENT_ID=your-google-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+GEMINI_API_KEY=your-gemini-key
+APP_SECRET_KEY=generate-a-secure-random-string
+BACKEND_URL=http://127.0.0.1:8000
+OAUTHLIB_RELAX_TOKEN_SCOPE=1
+OAUTHLIB_INSECURE_TRANSPORT=1
 ```
 
-### 2. Deploy to Cloud Run
-
-```bash
-gcloud run deploy opscore \
-  --image gcr.io/YOUR_PROJECT_ID/opscore \
-  --platform managed \
-  --region us-central1 \
-  --port 3000 \
-  --allow-unauthenticated \
-  --set-env-vars "GOOGLE_CLIENT_ID=xxx,GOOGLE_CLIENT_SECRET=xxx,APP_SECRET_KEY=xxx,BACKEND_URL=http://localhost:8000,OAUTHLIB_RELAX_TOKEN_SCOPE=1"
-```
+*(Note: `GOOGLE_REDIRECT_URI` is hardcoded to the Render URL in `config.py` for simplicity)*
 
 ### 3. Update OAuth Redirect
 
 In [GCP Console → Credentials](https://console.cloud.google.com/apis/credentials):
-- Add your Cloud Run URL to **Authorized redirect URIs**: `https://your-app-xxx.run.app/auth/callback`
-- Add to **Authorized JavaScript origins**: `https://your-app-xxx.run.app`
-
-### Alternative: Railway / Render
-
-```bash
-# Railway (one-click)
-railway login
-railway init
-railway up
-
-# Render — connect GitHub repo, set environment variables in dashboard
-```
+- Add your Render URL to **Authorized redirect URIs**: `https://opscore-freelance-assistant.onrender.com/auth/callback`
+- Add to **Authorized JavaScript origins**: `https://opscore-freelance-assistant.onrender.com`
 
 ---
 
