@@ -12,7 +12,7 @@ class Settings:
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
     GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
     GOOGLE_REDIRECT_URI: str = os.getenv(
-        "GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/callback"
+        "GOOGLE_REDIRECT_URI", "https://opscore-freelance-assistant.onrender.com/auth/callback"
     )
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     APP_SECRET_KEY: str = os.getenv("APP_SECRET_KEY", "change-me-in-production")
